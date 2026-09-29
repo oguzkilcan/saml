@@ -2,7 +2,9 @@ package saml
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/xml"
@@ -415,6 +417,81 @@ func TestSPCanProduceRedirectLogoutRequest(t *testing.T) {
 	assert.Check(t, is.Equal("/idp/profile/SAML2/Redirect/SLO",
 		redirectURL.Path))
 	golden.Assert(t, string(decodedRequest), t.Name()+"_decodedRequest")
+}
+
+// assertRedirectSignature checks the Signature query parameter of u against cert, over the content
+// the HTTP-Redirect binding signs: the raw SAMLRequest, RelayState and SigAlg parameters, in that order.
+func assertRedirectSignature(t *testing.T, u *url.URL, cert *x509.Certificate) {
+	t.Helper()
+
+	rawParams := map[string]string{}
+	for _, param := range strings.Split(u.RawQuery, "&") {
+		key, value, _ := strings.Cut(param, "=")
+		rawParams[key] = value
+	}
+
+	signedContent := "SAMLRequest=" + rawParams["SAMLRequest"]
+	if relayState, ok := rawParams["RelayState"]; ok {
+		signedContent += "&RelayState=" + relayState
+	}
+	signedContent += "&SigAlg=" + rawParams["SigAlg"]
+
+	assert.Check(t, is.Equal(dsig.RSASHA256SignatureMethod, u.Query().Get("SigAlg")))
+
+	signature, err := base64.StdEncoding.DecodeString(u.Query().Get("Signature"))
+	assert.Assert(t, err)
+
+	digest := sha256.Sum256([]byte(signedContent))
+	assert.Check(t, rsa.VerifyPKCS1v15(cert.PublicKey.(*rsa.PublicKey), crypto.SHA256, digest[:], signature))
+}
+
+func TestSPSignedRedirectAuthnRequestKeepsDestinationQueryUnsigned(t *testing.T) {
+	test := NewServiceProviderTest(t)
+	s := ServiceProvider{
+		Key:             test.Key,
+		Certificate:     test.Certificate,
+		MetadataURL:     mustParseURL("https://15661444.ngrok.io/saml2/metadata"),
+		AcsURL:          mustParseURL("https://15661444.ngrok.io/saml2/acs"),
+		IDPMetadata:     &EntityDescriptor{},
+		SignatureMethod: dsig.RSASHA256SignatureMethod,
+	}
+
+	req, err := s.MakeAuthenticationRequest("https://idp.example.com/sso?idpid=C01abc", HTTPRedirectBinding, HTTPPostBinding)
+	assert.Assert(t, err)
+
+	redirectURL, err := req.Redirect("state with spaces&an ampersand", &s)
+	assert.Assert(t, err)
+
+	assert.Check(t, strings.HasPrefix(redirectURL.RawQuery, "idpid=C01abc&SAMLRequest="))
+	assert.Check(t, is.Equal("C01abc", redirectURL.Query().Get("idpid")))
+	assert.Check(t, is.Equal("state with spaces&an ampersand", redirectURL.Query().Get("RelayState")))
+	assertRedirectSignature(t, redirectURL, test.Certificate)
+}
+
+func TestSPCanProduceSignedRedirectLogoutRequest(t *testing.T) {
+	test := NewServiceProviderTest(t)
+	s := ServiceProvider{
+		Key:             test.Key,
+		Certificate:     test.Certificate,
+		MetadataURL:     mustParseURL("https://15661444.ngrok.io/saml2/metadata"),
+		AcsURL:          mustParseURL("https://15661444.ngrok.io/saml2/acs"),
+		IDPMetadata:     &EntityDescriptor{},
+		SignatureMethod: dsig.RSASHA256SignatureMethod,
+	}
+	err := xml.Unmarshal(test.IDPMetadata, &s.IDPMetadata)
+	assert.Check(t, err)
+
+	redirectURL, err := s.MakeRedirectLogoutRequest("ross@octolabs.io", "relayState")
+	assert.Assert(t, err)
+
+	assert.Check(t, is.Equal("idp.testshib.org", redirectURL.Host))
+	assert.Check(t, is.Equal("/idp/profile/SAML2/Redirect/SLO", redirectURL.Path))
+	assertRedirectSignature(t, redirectURL, test.Certificate)
+
+	decodedRequest, err := testsaml.ParseRedirectRequest(redirectURL)
+	assert.Assert(t, err)
+	assert.Check(t, is.Contains(string(decodedRequest), "ross@octolabs.io"))
+	assert.Check(t, !strings.Contains(string(decodedRequest), "Signature"), "the enveloped signature must not be encoded in the redirect binding")
 }
 
 func TestSPCanProducePostLogoutResponse(t *testing.T) {

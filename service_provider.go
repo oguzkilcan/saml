@@ -283,11 +283,18 @@ func (sp *ServiceProvider) MakeRedirectAuthenticationRequest(relayState string) 
 
 // Redirect returns a URL suitable for using the redirect binding with the request
 func (r *AuthnRequest) Redirect(relayState string, sp *ServiceProvider) (*url.URL, error) {
+	return redirectURL(r.Destination, r.Element(), relayState, sp)
+}
+
+// redirectURL returns destination with el deflated into the SAMLRequest query parameter, signed as the
+// HTTP-Redirect binding specifies (SAML bindings, section 3.4.4.1) when sp has a signature method.
+// The signed content covers only SAMLRequest, RelayState and SigAlg, never the destination's own query.
+func redirectURL(destination string, el *etree.Element, relayState string, sp *ServiceProvider) (*url.URL, error) {
 	var requestStr strings.Builder
 	base64Writer := base64.NewEncoder(base64.StdEncoding, &requestStr)
 	compressedWriter, _ := flate.NewWriter(base64Writer, 9)
 	doc := etree.NewDocument()
-	doc.SetRoot(r.Element())
+	doc.SetRoot(el)
 	if _, err := doc.WriteTo(compressedWriter); err != nil {
 		return nil, err
 	}
@@ -298,21 +305,15 @@ func (r *AuthnRequest) Redirect(relayState string, sp *ServiceProvider) (*url.UR
 		return nil, err
 	}
 
-	rv, err := url.Parse(r.Destination)
+	rv, err := url.Parse(destination)
 	if err != nil {
 		return nil, err
 	}
 
 	// We can't depend on Query().set() as order matters for signing
-	query := rv.RawQuery
-	if len(query) > 0 {
-		query += "&SAMLRequest=" + url.QueryEscape(requestStr.String())
-	} else {
-		query += "SAMLRequest=" + url.QueryEscape(requestStr.String())
-	}
-
+	query := "SAMLRequest=" + url.QueryEscape(requestStr.String())
 	if relayState != "" {
-		query += "&RelayState=" + relayState
+		query += "&RelayState=" + url.QueryEscape(relayState)
 	}
 	if len(sp.SignatureMethod) > 0 {
 		query += "&SigAlg=" + url.QueryEscape(sp.SignatureMethod)
@@ -329,6 +330,9 @@ func (r *AuthnRequest) Redirect(relayState string, sp *ServiceProvider) (*url.UR
 		query += "&Signature=" + url.QueryEscape(base64.StdEncoding.EncodeToString(sig))
 	}
 
+	if rv.RawQuery != "" {
+		query = rv.RawQuery + "&" + query
+	}
 	rv.RawQuery = query
 
 	return rv, nil
@@ -1397,36 +1401,16 @@ func (sp *ServiceProvider) MakeRedirectLogoutRequest(nameID, relayState string) 
 	if err != nil {
 		return nil, err
 	}
-	return req.Redirect(relayState), nil
+	return req.Redirect(relayState, sp)
 }
 
-// Redirect returns a URL suitable for using the redirect binding with the request
-func (r *LogoutRequest) Redirect(relayState string) *url.URL {
-	w := &bytes.Buffer{}
-	w1 := base64.NewEncoder(base64.StdEncoding, w)
-	w2, _ := flate.NewWriter(w1, 9)
-	doc := etree.NewDocument()
-	doc.SetRoot(r.Element())
-	if _, err := doc.WriteTo(w2); err != nil {
-		panic(err)
-	}
-	if err := w2.Close(); err != nil {
-		panic(err)
-	}
-	if err := w1.Close(); err != nil {
-		panic(err)
-	}
+// Redirect returns a URL suitable for using the redirect binding with the request.
+// An enveloped signature is left out, the binding carries the signature in the query string.
+func (r *LogoutRequest) Redirect(relayState string, sp *ServiceProvider) (*url.URL, error) {
+	unsigned := *r
+	unsigned.Signature = nil
 
-	rv, _ := url.Parse(r.Destination)
-
-	query := rv.Query()
-	query.Set("SAMLRequest", w.String())
-	if relayState != "" {
-		query.Set("RelayState", relayState)
-	}
-	rv.RawQuery = query.Encode()
-
-	return rv
+	return redirectURL(r.Destination, unsigned.Element(), relayState, sp)
 }
 
 // MakePostLogoutRequest creates a SAML authentication request using
