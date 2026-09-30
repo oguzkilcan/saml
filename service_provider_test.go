@@ -2,12 +2,14 @@ package saml
 
 import (
 	"bytes"
+	"compress/flate"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/xml"
 	"html"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strings"
@@ -415,6 +417,41 @@ func TestSPCanProduceRedirectLogoutRequest(t *testing.T) {
 	assert.Check(t, is.Equal("/idp/profile/SAML2/Redirect/SLO",
 		redirectURL.Path))
 	golden.Assert(t, string(decodedRequest), t.Name()+"_decodedRequest")
+}
+
+func TestSPRejectsEmptyLogoutResponse(t *testing.T) {
+	test := NewServiceProviderTest(t)
+	s := ServiceProvider{
+		Key:         test.Key,
+		Certificate: test.Certificate,
+		MetadataURL: mustParseURL("https://15661444.ngrok.io/saml2/metadata"),
+		AcsURL:      mustParseURL("https://15661444.ngrok.io/saml2/acs"),
+		SloURL:      mustParseURL("https://15661444.ngrok.io/saml2/slo"),
+		IDPMetadata: &EntityDescriptor{},
+	}
+	err := xml.Unmarshal(test.IDPMetadata, &s.IDPMetadata)
+	assert.Check(t, err)
+
+	var deflated bytes.Buffer
+	w, err := flate.NewWriter(&deflated, flate.BestCompression)
+	assert.Assert(t, err)
+	assert.Assert(t, w.Close())
+
+	emptyRedirectValue := base64.StdEncoding.EncodeToString(deflated.Bytes())
+
+	for name, req := range map[string]*http.Request{
+		"no response":             httptest.NewRequest(http.MethodGet, "https://15661444.ngrok.io/saml2/slo", nil),
+		"logout request instead":  httptest.NewRequest(http.MethodGet, "https://15661444.ngrok.io/saml2/slo?SAMLRequest=abc", nil),
+		"empty redirect response": httptest.NewRequest(http.MethodGet, "https://15661444.ngrok.io/saml2/slo?SAMLResponse="+url.QueryEscape(emptyRedirectValue), nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := s.ValidateLogoutResponseRequest(req)
+
+			invalidResponse, ok := err.(*InvalidResponseError)
+			assert.Assert(t, ok, "expected an InvalidResponseError, got %v", err)
+			assert.Check(t, is.Equal(errEmptyLogoutResponse, invalidResponse.PrivateErr))
+		})
+	}
 }
 
 func TestSPCanProducePostLogoutResponse(t *testing.T) {

@@ -1636,6 +1636,8 @@ func (sp *ServiceProvider) ValidateLogoutResponseRequest(req *http.Request) erro
 	return sp.ValidateLogoutResponseForm(req.PostForm.Get("SAMLResponse"))
 }
 
+var errEmptyLogoutResponse = errors.New("logout response contains no XML element")
+
 // ValidateLogoutResponseForm returns a nil error if the logout response is valid.
 func (sp *ServiceProvider) ValidateLogoutResponseForm(postFormData string) error {
 	retErr := &InvalidResponseError{
@@ -1657,6 +1659,11 @@ func (sp *ServiceProvider) ValidateLogoutResponseForm(postFormData string) error
 	doc := etree.NewDocument()
 	if err := doc.ReadFromBytes(rawResponseBuf); err != nil {
 		retErr.PrivateErr = err
+		return retErr
+	}
+
+	if doc.Root() == nil {
+		retErr.PrivateErr = errEmptyLogoutResponse
 		return retErr
 	}
 
@@ -1702,6 +1709,11 @@ func (sp *ServiceProvider) ValidateLogoutResponseRedirect(queryParameterData str
 	doc := etree.NewDocument()
 	if err := doc.ReadFromBytes(gr); err != nil {
 		retErr.PrivateErr = err
+		return retErr
+	}
+
+	if doc.Root() == nil {
+		retErr.PrivateErr = errEmptyLogoutResponse
 		return retErr
 	}
 
